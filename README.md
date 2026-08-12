@@ -1,113 +1,153 @@
 # ChambaChain
 
-**Reputación laboral verificable para trabajadores informales y de la economía gig en Perú.**
+Plataforma de reputación laboral on-chain para trabajadores informales y de la economía gig en Perú.
 
-Hackathon Ethereum Lima 2026 — track Advanced (Scaffold-Stylus + IA).
+ChambaChain convierte evidencia de trabajo real en una señal verificable, portable y confiable. En lugar de depender de reseñas aisladas en aplicaciones específicas, la reputación queda registrada en una red blockchain y se puede consultar desde cualquier interfaz compatible.
 
----
+La aplicación actual está enfocada en tres puntos clave:
 
-## El problema
-
-Un repartidor, un gasfitero o un freelance peruano construye reputación durante años, pero esa reputación vive
-encerrada dentro de cada plataforma. Si cambia de app, empieza de cero. No existe una forma de acumular una señal de
-confianza que **se mueva con la persona** entre plataformas.
-
-## La solución
-
-ChambaChain registra **atestaciones de confianza on-chain**, generadas por un análisis de IA sobre la evidencia que el
-trabajador aporta (reseñas, descripciones de trabajos hechos, testimonios de clientes).
-
-La decisión de diseño central: **el score lo escribe un oracle autorizado, no el trabajador.**
-
-El backend corre el análisis de IA y firma la transacción con la llave del oracle. El contrato rechaza cualquier
-escritura que no venga de una address autorizada. Sin esa restricción el registro sería un cuaderno donde cada quien
-se pone la nota que quiere; con ella, el contrato **es** el mecanismo de confianza.
+- conectar la wallet del trabajador,
+- enviar evidencia de desempeño,
+- consultar el score y el historial de atestaciones en una vista de reputación.
 
 ---
 
-## Arquitectura
+## Qué problema resuelve
+
+Un repartidor, un gasfitero, un ayudante de obra o un freelance peruano suele construir confianza durante años, pero esa reputación queda atrapada dentro de una sola app o plataforma.
+
+Cuando cambia de servicio, empieza de cero. ChambaChain propone un sistema donde:
+
+- la evidencia se analiza con IA,
+- un oracle autorizado registra el resultado on-chain,
+- el historial queda asociado a una wallet y puede verificarse en cualquier momento.
+
+---
+
+## Cómo funciona hoy
+
+La experiencia actual de la app está organizada en tres pantallas muy claras:
+
+1. Home
+   - Presenta la idea general del producto.
+   - Explica que la reputación laboral puede ser verificable.
+   - Muestra el wallet conectado si existe una cuenta activa.
+
+2. Enviar evidencia
+   - El usuario conecta su wallet.
+   - Escribe una descripción de su actividad, reseñas, tareas, testimonios o trabajo realizado.
+   - La API de la app llama a Groq para analizar la evidencia y devolver un score de 0 a 100 con una explicación.
+   - Un oracle autorizado firma la transacción y registra la atestación en el contrato.
+
+3. Mi reputación
+   - Lee el score más reciente desde el contrato.
+   - Muestra el historial completo de atestaciones.
+   - Presenta la línea de tiempo con fechas y hash de la evidencia.
+
+La lógica clave es que el usuario no puede asignarse a sí mismo un score: solo una address autorizada puede escribir la atestación. Eso convierte el sistema en una reputación verificable, no un auto-reconocimiento.
+
+---
+
+## Arquitectura del flujo
 
 ```mermaid
 flowchart LR
-    U["👷 Trabajador<br/>(wallet conectada)"]
-    F["Frontend Next.js<br/>wagmi + RainbowKit"]
-    API["API Route<br/>POST /api/evaluate"]
-    AI["LLM Groq<br/>(llama-3.3-70b)"]
-    O["Oracle<br/>firma la tx"]
-    C["ReputationRegistry<br/>contrato Stylus (Rust)"]
-    A["Arbitrum"]
-
-    U -->|"1 · pega evidencia en texto"| F
-    F -->|"2 · worker + evidencia"| API
-    API -->|"3 · prompt estructurado"| AI
-    AI -->|"4 · JSON score + reasoning"| API
-    API -->|"5 · keccak256(evidencia)"| O
-    O -->|"6 · submitAttestation(worker, score, hash)"| C
-    C --- A
-    C -->|"7 · getLatestScore / getHistory"| F
-    F -->|"8 · score + timeline + link a Arbiscan"| U
-
-    style C fill:#2d3748,stroke:#4fd1c5,color:#fff
-    style AI fill:#2d3748,stroke:#d69e2e,color:#fff
-    style O fill:#2d3748,stroke:#f56565,color:#fff
+    U["Usuario / trabajador"] --> F["Frontend Next.js"]
+    F --> API["/api/evaluate"]
+    API --> IA["Groq LLM"]
+    API --> ORACLE["Oracle autorizado"]
+    ORACLE --> CONTRACT["ReputationRegistry (Stylus)"]
+    CONTRACT --> CHAIN["Arbitrum / red local Nitro"]
+    F --> READ["Lectura del historial y score"]
+    READ --> CONTRACT
 ```
 
-**Qué sube on-chain:** el score, el timestamp y el `keccak256` de la evidencia. El texto de la evidencia **no** se
-sube — el hash sirve para probar después que un score corresponde exactamente a esa evidencia y no a otra.
+### Flujo real
+
+- El usuario pega evidencia textual en la pantalla de evaluación.
+- El backend valida que la dirección y la evidencia sean válidas.
+- Se genera un hash `keccak256` de la evidencia para guardar una prueba inmutable.
+- El modelo de IA devuelve un `score` y un `reasoning`.
+- El oracle firma la transacción con su llave privada.
+- El contrato registra:
+  - worker,
+  - score,
+  - timestamp,
+  - evidenceHash.
+- La UI vuelve a consultar `getLatestScore` y `getHistory` para mostrar el estado actual.
 
 ---
 
-## El contrato: `ReputationRegistry`
+## Qué se guarda on-chain
 
-Escrito en Rust con [Stylus](https://arbitrum.io/stylus). Un solo contrato, sin sobre-diseño.
+La evidencia completa no se guarda en blockchain. Lo que se registra es:
 
-```rust
-pub struct Attestation {
-    uint8   score;          // 0-100
-    uint64  timestamp;
-    bytes32 evidence_hash;  // hash del texto evaluado por la IA
-}
+- `score`: número entero entre 0 y 100,
+- `timestamp`: momento de la atestación,
+- `evidenceHash`: hash de la evidencia, calculado con `keccak256`.
 
-pub struct ReputationRegistry {
-    address owner;
-    mapping(address => Attestation[]) worker_history;
-    mapping(address => bool) authorized_oracles;
-}
-```
-
-| Función | Quién puede llamarla | Qué hace |
-| --- | --- | --- |
-| `submitAttestation(worker, score, evidenceHash)` | **solo oracles autorizados** | Registra una atestación. Rechaza `score > 100`. |
-| `getLatestScore(worker)` | cualquiera | Último score (0 si no tiene historial). |
-| `getHistory(worker)` | cualquiera | Historial completo `(score, timestamp, evidenceHash)[]`. |
-| `getHistoryLength(worker)` / `getAttestation(worker, i)` | cualquiera | Acceso indexado al historial. |
-| `addOracle(a)` / `removeOracle(a)` | **solo owner** | Gestiona quién puede escribir. |
-| `owner()` / `isOracle(a)` | cualquiera | Lectura de permisos. |
-
-El constructor registra al deployer como owner **y** como primer oracle, para que el backend pueda escribir desde el
-arranque.
+Esto permite verificar que el score corresponde exactamente a la evidencia evaluada sin exponer el texto completo en la cadena.
 
 ---
 
-## Requisitos
+## Contrato inteligente
 
-- Node >= 20.18 y Yarn v2+
-- Docker (para el nodo Nitro local)
-- Rust **1.91.0** y `cargo-stylus` **0.10.8** (versiones fijas — no uses `stylusup`, instala las versiones exactas)
+El contrato principal está en Rust usando Stylus y se llama `reputation-registry`.
+
+Funciones principales:
+
+- `submitAttestation(worker, score, evidenceHash)`
+- `getLatestScore(worker)`
+- `getHistory(worker)`
+- `getHistoryLength(worker)`
+- `getAttestation(worker, index)`
+- `addOracle(address)`
+- `removeOracle(address)`
+- `owner()`
+- `isOracle(address)`
+
+La decisión de diseño es intencional: el score no lo escribe el usuario, sino un oracle autorizado. Esa restricción es la base de la confianza del sistema.
+
+---
+
+## Stack técnico
+
+- Frontend: Next.js
+- UI: scaffold + Tailwind/daisyUI/estilos actuales
+- Wallet: RainbowKit + Wagmi
+- Backend: Route handler de Next.js
+- IA: Groq (modelo `llama-3.3-70b-versatile` o equivalente)
+- Contrato: Rust + Stylus
+- Red local: Nitro devnode
+- EVM/L2: Arbitrum-compatible local devnet
+
+---
+
+## Requisitos previos
+
+Necesitas lo siguiente en tu entorno:
+
+- Node.js 20+
+- Yarn 3
+- Docker
+- Rust
+- `cargo-stylus`
 - Foundry (`cast`)
+
+Instalación base de Rust y herramientas:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup default 1.91.0
 rustup target add wasm32-unknown-unknown --toolchain 1.91.0
 cargo install --force --locked cargo-stylus@0.10.8
-curl -L https://foundry.paradigm.xyz | bash && foundryup
+curl -L https://foundry.paradigm.xyz | bash
+foundryup
 ```
 
-> **Windows:** Scaffold-Stylus no soporta Windows nativo. Usa WSL2 (Ubuntu) con `networkingMode=mirrored` en
-> `%USERPROFILE%\.wslconfig`, de modo que el contenedor de Docker publicado en Windows sea alcanzable desde WSL.
+---
 
-## Instalación
+## Instalación del proyecto
 
 ```bash
 git clone https://github.com/Paulcd/chambachain.git
@@ -115,84 +155,119 @@ cd chambachain
 yarn install
 ```
 
-Configura el frontend:
+Configura las variables del entorno del servidor:
 
 ```bash
 cp packages/nextjs/.env.example packages/nextjs/.env.local
 ```
 
-y rellena `GROQ_API_KEY` (capa gratuita, en https://console.groq.com/keys) y `ORACLE_PRIVATE_KEY` (para la devnet local ya viene la llave de prueba documentada).
+Completa mínimo esto:
 
-## Correrlo en local
+- `GROQ_API_KEY`
+- `ORACLE_PRIVATE_KEY`
 
-Tres terminales:
+El archivo de ejemplo incluye una explicación detallada de cada valor y la recomendación de uso en red local.
+
+---
+
+## Cómo correrlo localmente
+
+Abre 3 terminales y ejecuta:
+
+### 1) Levantar la red local
 
 ```bash
 yarn chain
 ```
 
+### 2) Desplegar el contrato
+
 ```bash
 yarn deploy
 ```
+
+### 3) Iniciar la app
 
 ```bash
 yarn start
 ```
 
-App en <http://localhost:3000>.
+La app queda disponible en:
 
-### Tests del contrato
-
-```bash
-yarn stylus:test
+```text
+http://localhost:3000
 ```
-
-### Desplegar a Arbitrum Sepolia
-
-```bash
-yarn deploy --network sepolia
-```
-
-Requiere `PRIVATE_KEY_SEPOLIA`, `ACCOUNT_ADDRESS_SEPOLIA` y `RPC_URL_SEPOLIA` en `packages/stylus/.env`.
 
 ---
 
-## Las 3 pantallas
+## Cómo se ve la data en la aplicación
 
-1. **Conectar wallet** — RainbowKit, tal cual viene del scaffold.
-2. **Enviar evidencia** (`/evaluar`) — textarea + "Evaluar y registrar" → score, razonamiento de la IA y link a la tx.
-3. **Mi reputación** (`/mi-reputacion`) — score actual y línea de tiempo de atestaciones leída del contrato.
+La app no solo muestra un score aislado; presenta un flujo de reputación completo:
 
----
+- en la pantalla de evaluación, el usuario ve el detalle de su evidencia y el resultado de la IA,
+- en la pantalla de reputación, se muestra el score actual en una tarjeta principal,
+- además aparece la línea de tiempo con cada atestación y su hash:
+  - puntaje,
+  - fecha/hora,
+  - hash de la evidencia,
+  - badge de la atestación más reciente.
 
-## Despliegue
-
-| | |
-| --- | --- |
-| Red | _(pendiente de deploy)_ |
-| Dirección del contrato | _(pendiente de deploy)_ |
-| Arbiscan | _(pendiente de deploy)_ |
-| Demo | _(pendiente)_ |
+Esto hace que la reputación sea legible, comparable y verificable sin perder el enfoque del producto.
 
 ---
 
-## Estructura
+## Estructura del repositorio
 
+```text
+.
+├── nitro-devnode/
+│   └── scripts y nodo local para Arbitrum Nitro
+├── packages/
+│   ├── nextjs/
+│   │   ├── app/
+│   │   │   ├── api/evaluate/
+│   │   │   ├── evaluar/
+│   │   │   ├── mi-reputacion/
+│   │   │   └── page.tsx
+│   │   ├── components/
+│   │   ├── hooks/
+│   │   └── contracts/
+│   └── stylus/
+│       ├── contracts/
+│       ├── scripts/
+│       └── test setup
+├── package.json
+├── README.md
+└── .env.example (según proyecto)
 ```
-packages/
-  stylus/contracts/reputation-registry/   # el contrato en Rust
-  stylus/scripts/deploy.ts                # despliegue + export del ABI al frontend
-  nextjs/app/api/evaluate/route.ts        # IA + oracle (firma la tx)
-  nextjs/app/evaluar/                     # pantalla 2
-  nextjs/app/mi-reputacion/               # pantalla 3
-```
+
+---
 
 ## Seguridad
 
-- La llave del oracle vive **solo** en variables de entorno del servidor, nunca en el cliente ni en el repo.
-- `/api/evaluate` valida la address, exige un mínimo de evidencia y acota el score a 0-100 antes de enviarlo
-  (el contrato también lo valida).
-- La evidencia en texto plano no se persiste: solo viaja al modelo y se guarda su hash.
+El proyecto mantiene un enfoque serio de seguridad:
+
+- la llave del oracle se usa solo en el backend,
+- la evidencia no se persiste como texto plano en la cadena,
+- el contrato valida el rango del score,
+- la escritura solo la puede hacer una address autorizada.
+
+La idea es que la confianza del sistema no dependa del usuario, sino del protocolo y del oracle.
+
+---
+
+## Estado del proyecto
+
+Este repositorio ya refleja la lógica de negocio y la experiencia de usuario que actualmente está funcionando:
+
+- conexión de wallet,
+- evaluación de evidencia con IA,
+- registro on-chain de la reputación,
+- consulta del historial y del score actual.
+
+Se mantiene el diseño actual y se prioriza claridad, legibilidad y coherencia con la data que se está mostrando.
+
+---
 
 ## Licencia
 
