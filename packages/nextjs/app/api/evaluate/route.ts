@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import Anthropic from "@anthropic-ai/sdk";
 import { createWalletClient, http, isAddress, keccak256, stringToHex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import deployedContracts from "~~/contracts/deployedContracts";
@@ -8,17 +7,21 @@ import scaffoldConfig from "~~/scaffold.config";
 /**
  * ChambaChain — servicio de IA + oracle.
  *
- * Flujo: evidencia en texto plano -> Claude devuelve {score, reasoning} ->
- * el backend firma `submitAttestation` con la llave del oracle y devuelve el
+ * Flujo: evidencia en texto plano -> el LLM (Groq) devuelve {score, reasoning}
+ * -> el backend firma `submitAttestation` con la llave del oracle y devuelve el
  * hash de la tx. El trabajador nunca escribe su propio score.
+ *
+ * Usamos Groq (endpoint compatible con OpenAI, capa gratuita) via `fetch`, sin
+ * SDK adicional. Cambiar de proveedor = cambiar URL, modelo y API key.
  */
 
 const CONTRACT_NAME = "reputation-registry";
 const MAX_EVIDENCE_CHARS = 12_000;
 
 // Modelo overridable por entorno: si la API rechaza el id por defecto, ajusta
-// ANTHROPIC_MODEL sin tocar el codigo.
-const CLAUDE_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-5";
+// GROQ_MODEL sin tocar el codigo.
+const GROQ_MODEL = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
+const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 const targetChain = scaffoldConfig.targetNetworks[0];
 
@@ -71,56 +74,73 @@ function buildExplorerUrl(txHash: string): string | null {
   return base ? `${base}/tx/${txHash}` : null;
 }
 
-// Forzamos JSON estructurado via tool use: definimos una unica herramienta y
-// obligamos al modelo a llamarla con `tool_choice`. Es el patron estable de la
-// Messages API para obtener salida estructurada sin parsear texto libre.
+// Forzamos JSON estructurado via function calling: definimos una unica funcion
+// y obligamos al modelo a llamarla con `tool_choice`. Es el patron estable para
+// obtener salida estructurada sin parsear texto libre.
 const EVALUATION_TOOL = {
-  name: "registrar_evaluacion",
-  description: "Registra el score de reputacion laboral y su justificacion.",
-  input_schema: {
-    type: "object" as const,
-    properties: {
-      score: {
-        type: "integer",
-        minimum: 0,
-        maximum: 100,
-        description: "Puntaje de reputacion entre 0 y 100.",
+  type: "function" as const,
+  function: {
+    name: "registrar_evaluacion",
+    description: "Registra el score de reputacion laboral y su justificacion.",
+    parameters: {
+      type: "object",
+      properties: {
+        score: {
+          type: "integer",
+          minimum: 0,
+          maximum: 100,
+          description: "Puntaje de reputacion entre 0 y 100.",
+        },
+        reasoning: {
+          type: "string",
+          description: "Justificacion breve en español, 1-2 frases concretas.",
+        },
       },
-      reasoning: {
-        type: "string",
-        description: "Justificacion breve en español, 1-2 frases concretas.",
-      },
+      required: ["score", "reasoning"],
+      additionalProperties: false,
     },
-    required: ["score", "reasoning"],
-    additionalProperties: false,
   },
 };
 
-async function evaluateWithClaude(evidence: string): Promise<EvaluationResult> {
-  const anthropic = new Anthropic(); // lee ANTHROPIC_API_KEY del entorno
+async function evaluateEvidence(evidence: string): Promise<EvaluationResult> {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error("Falta GROQ_API_KEY en el entorno del servidor.");
 
-  const response = await anthropic.messages.create({
-    model: CLAUDE_MODEL,
-    max_tokens: 1024,
-    system: SYSTEM_PROMPT,
-    tools: [EVALUATION_TOOL],
-    tool_choice: { type: "tool", name: EVALUATION_TOOL.name },
-    messages: [
-      {
-        role: "user",
-        content: `Evalua la siguiente evidencia laboral:\n\n<evidencia>\n${evidence}\n</evidencia>`,
-      },
-    ],
+  const response = await fetch(GROQ_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      temperature: 0,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        {
+          role: "user",
+          content: `Evalua la siguiente evidencia laboral:\n\n<evidencia>\n${evidence}\n</evidencia>`,
+        },
+      ],
+      tools: [EVALUATION_TOOL],
+      tool_choice: { type: "function", function: { name: EVALUATION_TOOL.function.name } },
+    }),
   });
 
-  const toolUse = response.content.find(block => block.type === "tool_use");
-  if (!toolUse || toolUse.type !== "tool_use") {
-    throw new Error("Claude no devolvio una evaluacion estructurada.");
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Groq respondio ${response.status}: ${detail.slice(0, 300)}`);
   }
 
-  const parsed = toolUse.input as EvaluationResult;
+  const data = await response.json();
+  const args = data?.choices?.[0]?.message?.tool_calls?.[0]?.function?.arguments;
+  if (typeof args !== "string") {
+    throw new Error("Groq no devolvio una evaluacion estructurada.");
+  }
+
+  const parsed = JSON.parse(args) as EvaluationResult;
   if (typeof parsed?.score !== "number" || typeof parsed?.reasoning !== "string") {
-    throw new Error("La evaluacion de Claude no tiene el formato esperado.");
+    throw new Error("La evaluacion de Groq no tiene el formato esperado.");
   }
 
   // El schema pide 0-100, pero acotamos igual porque el contrato rechaza > 100.
@@ -156,7 +176,7 @@ export async function POST(request: NextRequest) {
     const oracleKey = readOracleKey();
 
     // 1. La IA evalua la evidencia.
-    const { score, reasoning } = await evaluateWithClaude(trimmedEvidence);
+    const { score, reasoning } = await evaluateEvidence(trimmedEvidence);
 
     // 2. Anclamos la evidencia on-chain por su hash (el texto no se sube).
     const evidenceHash = keccak256(stringToHex(trimmedEvidence));

@@ -32,7 +32,7 @@ flowchart LR
     U["👷 Trabajador<br/>(wallet conectada)"]
     F["Frontend Next.js<br/>wagmi + RainbowKit"]
     API["API Route<br/>POST /api/evaluate"]
-    AI["Claude<br/>(claude-opus-5)"]
+    AI["LLM Groq<br/>(llama-3.3-70b)"]
     O["Oracle<br/>firma la tx"]
     C["ReputationRegistry<br/>contrato Stylus (Rust)"]
     A["Arbitrum"]
@@ -121,7 +121,7 @@ Configura el frontend:
 cp packages/nextjs/.env.example packages/nextjs/.env.local
 ```
 
-y rellena `ANTHROPIC_API_KEY` y `ORACLE_PRIVATE_KEY` (para la devnet local ya viene la llave de prueba documentada).
+y rellena `GROQ_API_KEY` (capa gratuita, en https://console.groq.com/keys) y `ORACLE_PRIVATE_KEY` (para la devnet local ya viene la llave de prueba documentada).
 
 ## Correrlo en local
 
