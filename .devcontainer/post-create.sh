@@ -11,11 +11,20 @@ grep -qxF 'export PATH="$HOME/.foundry/bin:$PATH"' "$HOME/.bashrc" || \
   echo 'export PATH="$HOME/.foundry/bin:$PATH"' >> "$HOME/.bashrc"
 foundryup
 
+echo ">> Asegurando que Cargo binarios esten en PATH..."
+export PATH="$HOME/.cargo/bin:$PATH"
+grep -qxF 'export PATH="$HOME/.cargo/bin:$PATH"' "$HOME/.bashrc" || \
+  echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$HOME/.bashrc"
+
+echo ">> Instalando dependencias del sistema requeridas para compilar cargo-stylus..."
+sudo apt-get update
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y pkg-config libssl-dev
+
 echo ">> Anadiendo target wasm (rust-toolchain.toml fija rustc 1.91.0)..."
 rustup target add wasm32-unknown-unknown
 
 echo ">> Instalando cargo-stylus 0.10.8 (version exigida por el scaffold)..."
-cargo install --locked cargo-stylus@0.10.8
+cargo install --locked cargo-stylus@0.10.8 --force
 
 echo ">> Instalando dependencias del frontend (yarn 3 vendorizado)..."
 corepack enable
