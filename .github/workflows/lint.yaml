@@ -1,0 +1,113 @@
+name: Lint
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+      - release/**
+
+jobs:
+  lint-and-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        node: [lts/*]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@master
+        with:
+          submodules: recursive
+
+      - name: Initialize submodules
+        run: |
+          cd packages/stylus
+          git submodule update --init --recursive
+
+      - name: Generate cache key
+        id: cache-key
+        run: |
+          echo "value=${{ github.sha }}-${{ matrix.os }}-${{ matrix.node }}" >> $GITHUB_OUTPUT
+
+      - name: Setup node env
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ matrix.node }}
+          cache: yarn
+
+      - name: Parse rust-toolchain.toml
+        id: parse-toolchain
+        run: |
+          # Extract channel/version
+          CHANNEL=$(grep -o 'channel = "[^"]*"' packages/stylus/contracts/rust-toolchain.toml | cut -d'"' -f2)
+          echo "toolchain=$CHANNEL" >> $GITHUB_OUTPUT
+
+          # Extract components (only from the components section, without quotes)
+          COMPONENTS=$(awk '/components = \[/,/\]/' packages/stylus/contracts/rust-toolchain.toml | grep -o '"[^"]*"' | sed 's/"//g' | tr '\n' ',' | sed 's/,$//')
+          echo "components=$COMPONENTS" >> $GITHUB_OUTPUT
+
+          # Extract targets (only from the targets section, without quotes)
+          TARGETS=$(awk '/targets = \[/,/\]/' packages/stylus/contracts/rust-toolchain.toml | grep -o '"[^"]*"' | sed 's/"//g' | tr '\n' ',' | sed 's/,$//')
+          echo "targets=$TARGETS" >> $GITHUB_OUTPUT
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ steps.parse-toolchain.outputs.toolchain }}
+          components: ${{ steps.parse-toolchain.outputs.components }}
+          target: ${{ steps.parse-toolchain.outputs.targets }}
+          override: true
+
+      - name: Install cargo-stylus
+        run: |
+          # Check if cargo-stylus is already installed and up to date
+          if command -v cargo-stylus &> /dev/null; then
+            echo "cargo-stylus already installed, checking version..."
+            cargo-stylus --version
+          else
+            echo "Installing cargo-stylus..."
+            cargo install --force --locked cargo-stylus@0.10.8
+          fi
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/stylus/contracts/target
+          key: rust-${{ runner.os }}-${{ steps.cache-key.outputs.cache-key }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+
+      - name: Cache Foundry
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.foundry
+          key: foundry-${{ runner.os }}-${{ steps.cache-key.outputs.cache-key }}
+          restore-keys: |
+            foundry-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Run nextjs lint
+        run: yarn next:lint
+
+      - name: Check typings on nextjs
+        run: yarn next:check-types
+
+      - name: Run stylus tests
+        run: yarn stylus:test
+
+      - name: Build nextjs
+        run: yarn next:build

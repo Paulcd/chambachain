@@ -1,0 +1,5 @@
+# Los scripts de shell y el bytecode del StylusDeployer SIEMPRE con LF.
+# En un clon sobre Windows, CRLF rompe bash en WSL y mete un \r final en el
+# bytecode, corrompiendo la transaccion que despliega el StylusDeployer.
+*.sh text eol=lf
+stylus-deployer-bytecode.txt text eol=lf

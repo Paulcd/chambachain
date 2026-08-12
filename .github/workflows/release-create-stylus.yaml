@@ -1,0 +1,185 @@
+name: Version Bump and Notify
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  check_commit:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    outputs:
+      SHOULD_RUN: ${{ steps.check_commit.outputs.SHOULD_RUN }}
+    steps:
+      - name: Checkout Files
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.ORG_GITHUB_TOKEN }}
+
+      - name: check if skip ci
+        id: check_commit
+        run: |
+          COMMIT_MESSAGE=$(git log -1 --pretty=%B)
+          if [[ "$COMMIT_MESSAGE" == *"[skip ci]"* ]]; then
+            echo "SHOULD_RUN=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Match is false"
+          fi
+
+  version-bump:
+    needs: check_commit
+    if: ${{ needs.check_commit.outputs.SHOULD_RUN != 'false' }}
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout Source Repository
+        uses: actions/checkout@v4
+        with:
+          repository: Arb-Stylus/scaffold-stylus
+          token: ${{ secrets.ORG_GITHUB_TOKEN }}
+          path: source_repo
+
+      - name: Checkout Destination Repository
+        uses: actions/checkout@v4
+        with:
+          repository: Arb-Stylus/create-stylus
+          token: ${{ secrets.ORG_GITHUB_TOKEN }}
+          path: destination_repo
+
+      - name: Determine version bump type
+        id: version
+        run: |
+          cd source_repo
+          commit_message=$(git log -1 --pretty=%s)
+          if [[ "$commit_message" == *"[major]"* ]]; then
+            echo "type=major" >> "$GITHUB_ENV"
+          elif [[ "$commit_message" == *"[minor]"* ]]; then
+            echo "type=minor" >> "$GITHUB_ENV"
+          elif [[ "$commit_message" == *"[prerelease]"* ]]; then
+            echo "type=prerelease --preid=rc" >> "$GITHUB_ENV"
+          elif [[ "$commit_message" == *"[hotfix]"* ]]; then
+            echo "type=prepatch" >> "$GITHUB_ENV"
+          else
+            echo "type=patch" >> "$GITHUB_ENV"
+          fi
+
+      - name: Bump version in Source Repository
+        id: bump-version-source
+        run: |
+          cd source_repo
+          git pull origin main --no-rebase --strategy=ort --no-edit
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          new_version=$(npm version ${{ env.type }} -m "chore(release): %s [skip ci]")
+          echo "NEW_VERSION=${new_version}" >> "$GITHUB_ENV"
+          git push origin main --follow-tags
+
+      - name: Copy Files to Destination Repository
+        run: |
+          rsync -av --delete \
+            --exclude='.git/' \
+            --include='.github/' \
+            --include='.github/workflows/' \
+            --include='.github/workflows/main.yml' \
+            --exclude='.github/*' \
+            --exclude='.github/workflows/*' \
+            --exclude='__test*__' \
+            --exclude='CHANGELOG*' \
+            --exclude='CONTRIBUTING*' \
+            --exclude='.claude/' \
+            --exclude='.worktrees/' \
+            source_repo/ destination_repo/templates/base
+          cd destination_repo
+          git add .
+          git commit -m "chore: sync files from scaffold-stylus [skip ci]"
+
+      - name: Format .gitignore files
+        run: |
+          find destination_repo/templates/base -type f -name ".gitignore" | while read -r gitignore_file; do
+            mjs_file="${gitignore_file%/*}/.gitignore.template.mjs"
+            gitignore_content=$(cat "$gitignore_file")
+            cat > "$mjs_file" <<-EOF
+          const contents = () => 
+          \`${gitignore_content}\`
+
+          export default contents;
+          EOF
+          rm "$gitignore_file"
+          done
+          cd destination_repo
+          git add .
+          git commit -m "Processed $gitignore_file into $mjs_file"
+
+      - name: Align destination version with npm registry
+        run: |
+          cd destination_repo
+          PKG=$(node -p "require('./package.json').name")
+          HIGHEST=$(npm view "$PKG" versions --json | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[^"]*' | sort -V | tail -1)
+          LOCAL=$(node -p "require('./package.json').version")
+          BASE=$(printf '%s\n%s\n' "$HIGHEST" "$LOCAL" | sort -V | tail -1)
+          echo "highest_published=$HIGHEST local=$LOCAL base=$BASE"
+          npm version "$BASE" --no-git-tag-version --allow-same-version
+          echo "HIGHEST=$HIGHEST" >> "$GITHUB_ENV"
+
+      - name: Bump version in Destination Repository
+        id: bump-version-destination
+        run: |
+          cd destination_repo
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          new_version=$(npm version ${{ env.type }} -m "chore(release): %s [skip ci]")
+          NEW=$(node -p "require('./package.json').version")
+          node -e '
+            const [a, b] = process.argv.slice(1);
+            const parse = v => { const [core, ...r] = v.split("-"); return { n: core.split(".").map(Number), p: r.join("-") }; };
+            const pa = parse(a), pb = parse(b);
+            for (let i = 0; i < 3; i++) { if (pa.n[i] !== pb.n[i]) process.exit(pa.n[i] > pb.n[i] ? 0 : 1); }
+            if (pa.p === pb.p) process.exit(0);
+            if (!pa.p) process.exit(0);
+            if (!pb.p) process.exit(1);
+            const ai = pa.p.split("."), bi = pb.p.split(".");
+            for (let i = 0; i < Math.max(ai.length, bi.length); i++) {
+              if (ai[i] === undefined) process.exit(0);
+              if (bi[i] === undefined) process.exit(1);
+              const an = /^[0-9]+$/.test(ai[i]), bn = /^[0-9]+$/.test(bi[i]);
+              if (an && bn) { const d = Number(ai[i]) - Number(bi[i]); if (d !== 0) process.exit(d > 0 ? 0 : 1); }
+              else if (an !== bn) process.exit(an ? 1 : 0);
+              else if (ai[i] !== bi[i]) process.exit(ai[i] < bi[i] ? 1 : 0);
+            }
+            process.exit(0);
+          ' "$NEW" "$HIGHEST" || { echo "::error::Computed $NEW is not above highest published $HIGHEST"; exit 1; }
+          git push origin main --follow-tags
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org/"
+
+      - name: Publish release
+        if: success()
+        id: publish-release
+        run: |
+          cd destination_repo
+          npm install && npm run build && npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Notify Slack on Success
+        if: success()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+          slack-message: "✅ Release Successful!\nVersion: ${{ env.NEW_VERSION }}\nRepository: ${{ github.event.repository.name }}\nEnvironment: prod\nBuild Status: ${{ job.status }}\nTriggered by: ${{ github.actor }}\n${{ github.event.pull_request.html_url || github.event.head_commit.url }}"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+      - name: Notify Slack on Failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+          slack-message: "❌ Release Failed!\nVersion: ${{ env.NEW_VERSION }}\n\nRepository: ${{ github.event.repository.name }}\nEnvironment: prod\nBuild Status: ${{ job.status }}\nTriggered by: ${{ github.actor }}\n${{ github.event.pull_request.html_url || github.event.head_commit.url }}"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
